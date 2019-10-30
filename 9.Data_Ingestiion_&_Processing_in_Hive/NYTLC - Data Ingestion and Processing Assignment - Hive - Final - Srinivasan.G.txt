@@ -1,0 +1,1332 @@
+﻿--
+-- ** *************************************************************************
+-- ** Data Ingestion & Processing Assignment in Hive - NYT TLC TRIP DATA
+-- ** Submitted by    : Srinivasan. G
+-- ** Batch           : September 2018.
+-- ** Date Submission : June 10, 2019.
+-- ** *************************************************************************
+--
+-- ** *************************************************************************
+-- ** OBJECTIVE: 
+-- ** ---------
+-- ** The New York City Taxi & Limousine Commission (TLC) has provided a 
+-- ** dataset of trips made by the taxis in the New York City.
+-- ** Our Objective is to understand the purpose of this dataset is to get a 
+-- ** better understanding of the taxi system so that the city of New York can 
+-- ** improve the efficiency of in-city commutes.
+-- ** In this assignment, we ONLY consider the data of yellow taxis for
+-- ** November and December of the year 2017.
+-- ** The dataset in the HDFS storage of the lab and under location follows:
+-- ** '/common_folder/nyc_taxi_data/'
+-- ** 
+-- ** DATA DESCRIPTION:
+-- ** -----------------
+-- ** As provided in the data dictionary;
+-- ** 1. vendorid: A code indicating the TPEP provider that provided the record.  
+-- **    [ 1= Creative Mobile Technologies, LLC; 2= VeriFone Inc. ]
+-- ** 2. tpep_pickup_datetime: The date and time when the meter was engaged.
+-- ** 3. tpep_dropoff_datetime: The date and time when the meter was disengaged.
+-- ** 4. Passenger_count: The number of passengers in the vehicle.
+-- ** 5. Trip_distance: The elapsed trip distance in miles reported by the taximeter.
+-- ** 6. PULocationID: TLC Taxi Zone in which the taximeter was engaged
+-- ** 7. DOLocationID: TLC Taxi Zone in which the taximeter was disengaged
+-- ** 8. RateCodeID: The final rate code in effect at the end of the trip.
+-- **    [1= Standard rate ; 2=JFK ; 3=Newark ; 4=Nassau or Westchester;
+-- **     5=Negotiated fare ; 6=Group ride]
+-- ** 9. Store_and_fwd_flag: This flag indicates whether the trip record was held
+-- **    in vehicle memory before sending to the vendor.
+-- **    [Y= store and forward trip ; N= not a store and forward trip]
+-- ** 10.Payment_type: A numeric code signifying how the passenger paid for the trip.
+-- **    [1= Credit card;2= Cash;3= No charge;4= Dispute;5= Unknown;6= Voided trip]
+-- ** 11.Fare_amount: The time-and-distance fare calculated by the meter.
+-- ** 12.Extra: Miscellaneous extras and surcharges. Currently, this only includes 
+-- **    the $0.50 and $1 rush hour and overnight charges.
+-- ** 13.MTA_tax: $0.50 MTA tax that is automatically triggered based on the metered
+-- **     rate in use.
+-- ** 14.Improvement_surcharge: $0.30 improvement surcharge assessed trips at the 
+-- **    flag drop. The improvement surcharge began being levied in 2015.
+-- ** 15.Tip_amount This field is automatically populated for credit card tips.
+-- **    Cash tips are not included.
+-- ** 16.Tolls_amount - Total amount of all tolls paid in trip.
+-- ** 17.Total_amount - The total amount charged to passengers. 
+-- **    Does not include cash tips.
+-- **
+-- ** **************************************************************************
+
+
+-- ** **************************************************************************
+-- 1. Hive Jars & Setup Hive Parameters
+-- ** **************************************************************************
+
+-- 1.1 Add necessary Hive Jars.
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+-- 1.2 Set necessary hive execution parameters 
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+SET hive.auto.convert.join=false;
+SET hive.auto.convert.join.noconditionaltask=false;
+
+
+-- ** *************************************************************************
+-- 2. Drop & Create External Table SG_NYCTLC_TRIP_DATA
+-- ** *************************************************************************
+
+-- 2.1 Drop the  External Table SG_NYCTLC_TRIP_DATA table.
+
+DROP table if exists sg_nyctlc_trip_data ;
+
+-- 2.2 Create the sg_nyctlc_trip_data External Table.
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sg_nyctlc_trip_data(
+    vendorid int,
+    tpep_pickup_datetime string,
+    tpep_dropoff_datetime string,
+    passenger_count int,
+    trip_distance double,
+    ratecodeid int,
+    store_and_fwd_flag string,
+    pulocationid int,
+    doLocationid int,
+    payment_type int,
+    fare_amount double,
+    extra double,
+    mta_tax double,
+    tip_amount double,
+    tolls_amount double,
+    improvement_surcharge double,
+    total_amount double)
+    ROW FORMAT
+    DELIMITED FIELDS TERMINATED BY ','
+    LINES TERMINATED BY '\n'
+    STORED AS TEXTFILE
+    LOCATION '/common_folder/nyc_taxi_data/'
+-- Following table property to remove the header name row.
+    tblproperties ("skip.header.line.count"="1") ;
+    
+-- 2.3 query the external sg_nyctlc_trip_data table.
+
+SELECT * FROM sg_nyctlc_trip_data limit 10;
+
+-- ==================================================================================================
+-- OBSERVATION: All table fields are as per the correct schema and format and populated with data.
+-- ==================================================================================================
+
+-- 2.4 Check the total rows.
+SELECT count(*) as total_rows FROM sg_nyctlc_trip_data ;
+
+-- ==================================================================================================
+-- ANSWER:
+--   total_rows
+--   	1174569
+-- ==================================================================================================
+-- OBSERVATION: There are 11,74,569 [1.17 million records]
+-- ==================================================================================================
+
+
+-- ** *************************************************************************  
+-- 3.0 EDA Analysis - Basic Data Quality Checks
+-- ** ************************************************************************* 
+
+
+- --------------------------------------------------------------------------------------------------
+-- Q1 : How many records has each TPEP provider provided?
+--     Write a query that summarises the number of records of each provider.
+-- -------------------------------------------------------------------------------------------------
+
+SELECT vendorid, count(*) as provider_count
+FROM sg_nyctlc_trip_data
+GROUP BY vendorid 
+ORDER BY vendorid ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	vendorid	provider_count
+--	1	        527386
+--	2	        647183
+-- ==================================================================================================
+-- OBSERVATION: 
+-- Number of Records for provider 1 = Creative Mobile Technologies., LLC is 5,27,386.[0.53 Millions]
+-- Number of Records for provider 2 = VeriFone Inc. is 6,47,183. [0.65 Millions]
+-- ==================================================================================================
+
+
+-- --------------------------------------------------------------------------------------------------
+-- Q2: The data provided is for months November and December only. 
+-- Check whether the data is consistent, and if not, identify the data quality issues. 
+-- Mention all data quality issues in comments.
+-- --------------------------------------------------------------------------------------------------
+-- --------------------------------------------------------------------------------------------------
+-- NOTE:: IMPORTANT::
+-- Following Data quality Checks are done on the data.
+-- 1.  On string data types, number of null values in the table
+-- 2.  On ID fields, checks are done for NULL values.
+-- 3.  On Amount fields, for checking for less than 0 (and/or zero); 
+--       a.Fare Amount and Total Amount are expected to be non-zero positive values.
+--       b.Tip, extra, mta_tax etc can be 0.0, but not expected to be negative.
+--       c.Pickup & dropoff time are not expected to be NULL 
+-- 4.  Pickup location and Drop off location not expected to be 0 (as being integers)
+-- 5.  Number of record counts for pickup and drop of timestamp for each year & Month
+-- 6.  Number of inconsistent records where pickup time is greater than drop off time.
+-- 7.  Number of passengers and the record counts.  
+-- 8.  Number of ratecodes and their record counts.
+-- 9.  Number of payment type records and their record counts.
+-- 10. Number of extra charge records and their record counts.
+-- 10. Number of tip Amount records present for Cash type payments.
+-- 11. Other Statistical Details (e.g., Min,Max and Avg) for Trip and Fare Details.
+-- -------------------------------------------------------------------------------------------------
+
+-- 3.1 Find out the number of NULLS or ZEROS in each Columns.
+
+SELECT 
+    SUM(CASE WHEN vendorid <=0 THEN 1 ELSE 0 END)                   AS vendorid_invalid,
+    SUM(CASE WHEN tpep_pickup_datetime  IS NULL THEN 1 ELSE  0 END) AS tpep_pick_up_datetime_null_count,
+    SUM(CASE WHEN tpep_dropoff_datetime IS NULL THEN 1 ELSE  0 END) AS tpep_dropoff_datetime_null_count,
+    SUM(CASE WHEN store_and_fwd_flag    IS NULL THEN 1 ELSE  0 END) AS store_and_fwd_flag_null_count,
+    SUM(CASE WHEN passenger_count <=0 THEN 1 ELSE 0 END)            AS passenger_count_invalid,
+    SUM(CASE WHEN trip_distance <= 0.0 THEN 1 ELSE 0 END)           AS trip_distance_invalid,
+    SUM(CASE WHEN ratecodeid <= 0 THEN 1 ELSE 0 END)                AS ratecodeid_invalid,
+    SUM(CASE WHEN pulocationid <= 0 THEN 1 ELSE 0 END)              AS pulocationid_invalid,
+    SUM(CASE WHEN doLocationid <= 0 THEN 1 ELSE 0 END)              AS doLocationid_invalid,
+    SUM(CASE WHEN payment_type <= 0 THEN 1 ELSE 0 END)              AS payment_type_invalid,
+    SUM(CASE WHEN fare_amount <= 0.0 THEN 1 ELSE 0 END)             AS fare_amount_invalid,
+    SUM(CASE WHEN extra < 0.0 THEN 1 ELSE 0 END)                    AS extra_invalid,
+    SUM(CASE WHEN mta_tax < 0.0 THEN 1 ELSE 0 END)                  AS mta_tax_invalid,
+    SUM(CASE WHEN tip_amount < 0.0 THEN 1 ELSE 0 END)               AS tip_amount_invalid,
+    SUM(CASE WHEN tolls_amount < 0.0 THEN 1 ELSE 0 END)             AS tolls_amount_invalid,
+    SUM(CASE WHEN improvement_surcharge < 0.0 THEN 1 ELSE 0 END)        AS improvement_surcharge_invalid,
+    SUM(CASE WHEN total_amount <= 0.0 THEN 1 ELSE 0 END)            AS total_amount_invalid
+
+FROM
+  sg_nyctlc_trip_data
+WHERE (vendorid <= 0            OR 
+        tpep_pickup_datetime  IS NULL OR 
+        tpep_dropoff_datetime IS NULL OR 
+        store_and_fwd_flag    IS NULL OR
+        passenger_count <= 0    OR 
+        pulocationid <= 0       OR
+        doLocationid <= 0       OR 
+        payment_type <= 0       OR 
+        trip_distance <= 0.0    OR 
+        ratecodeid <= 0.0       OR 
+        fare_amount <= 0.0      OR 
+        extra < 0.0             OR
+        mta_tax < 0.0           OR 
+        tip_amount < 0.0        OR 
+        tolls_amount < 0.0      OR
+        improvement_surcharge < 0.0 OR
+        total_amount <= 0.0 );
+        
+-- ==================================================================================================   
+--  ANSWER:
+--  Column Name                             Count    
+-- vendorid_invalid                             0
+-- tpep_pick_up_datetime_null_count             0
+-- tpep_dropoff_datetime_null_count             0
+-- store_and_fwd_flag_null_count                0
+-- passenger_count_invalid	             	 6824
+-- trip_distance_invalid                     7402	
+-- ratecodeid_invalid	                        0
+-- pulocationid_invalid	                        0
+-- dolocationid_invalid	                        0
+-- payment_type_invalid	                        0
+-- fare_amount_invalid	                      870
+-- extra_invalid	                      	  286   
+-- mta_tax_invalid                            544
+-- tip_amount_invalid                           4
+-- tolls_amount_invalid                         3	
+-- improvement_surcharge_invalid              558	
+-- total_amount_invalid                       681
+-- ==================================================================================================
+-- OBSERVATION:
+-- The passenger_count, trip_distance, fare_amount, extra, mta_tax,tip_amount,tolls_amount
+-- improvement_surcharge and total_amount column have data inconsistencies or null values in one
+-- or more rows.
+-- These rows either should be deleted or filtered/ignored while creating the new 
+-- partitioned table for further analysis. 
+-- ==================================================================================================
+
+-- 3.2 Check whether the data is consistent and provided for months November and December for the year 2017.
+--     So that, the columns tpep_pickup_datetime and tpep_dropoff_datetime should be within the months 
+--     November and December and the year should be 2017.
+--
+--     Check for the column tpep_pickup_datetime conforming to year& month range.
+
+SELECT  YEAR(tpep_pickup_datetime)  AS  pickup_year,
+        MONTH(tpep_pickup_datetime) AS  pickup_month,
+        COUNT(*) AS record_count
+FROM sg_nyctlc_trip_data
+GROUP BY YEAR(tpep_pickup_datetime),
+         MONTH(tpep_pickup_datetime)
+ORDER BY pickup_year, pickup_month ;
+
+-- ==================================================================================================
+-- Answer:
+-- 	pickup_year	pickup_month	record_count
+--	2003             1		     	 1
+--	2008	        12	             2
+--	2009	         1	             1
+--	2017	        10	             6
+--	2017	        11          580300
+--	2017	        12	        594255
+--	2018	         1	             4
+-- ==================================================================================================
+-- OBSERVATION: 
+-- The query on tpep_pickup_datetime have several non conforming records. The year of 
+--  tpep_pickup_datetime has year ranging from 2003 to 2018.
+-- Since our scope is for 2017 records there are 14 non conforming pickup year records.
+-- The remaining 11,74,555 records are from November & December 2017.
+-- ==================================================================================================
+
+-- 
+-- 3.3 Check for the column tpep_dropoff_datetime conforming to year & month range.
+
+SELECT  YEAR(tpep_dropoff_datetime)  AS dropoff_year,
+        MONTH(tpep_dropoff_datetime) AS dropoff_month,
+        COUNT(*) AS record_count
+FROM sg_nyctlc_trip_data
+GROUP BY YEAR(tpep_dropoff_datetime),
+         MONTH(tpep_dropoff_datetime)
+ORDER BY dropoff_year, dropoff_month ;
+
+-- ==================================================================================================
+-- Answer:
+-- 	dropoff_year	dropoff_month	record_count
+--	    2003	        1	   			1
+--	    2008	        12         		1
+--	    2009	        1	   			2
+--	    2017	        10         		2
+--	    2017	        11    	   580053
+--	    2017	        12    	   594399
+--	    2018	        1	 		  110
+--	    2019	        4	   			1
+-- ==================================================================================================
+-- OBSERVATION:
+-- The query on tpep_dropoff_datetime returns have non conforming records and has year 
+--  ranging from 2003 to 2019.,
+-- There are 117 non conforming pickup_year records.
+-- The remaining 11,74,452 records for November & December 2017.
+-- ==================================================================================================
+
+-- 3.4 Check if there are any records in which the pickup_timestamp is greater than the dropoff_timestamp. 
+--     If any, it implies the inconsistency in the data.
+
+SELECT COUNT(*) AS invalid_pudo_datetime_timestamp
+FROM sg_nyctlc_trip_data
+WHERE UNIX_TIMESTAMP(tpep_pickup_datetime) > UNIX_TIMESTAMP(tpep_dropoff_datetime) ;
+
+-- ==================================================================================================
+-- ANSWER :
+-- invalid_pudo_datetime_timestamp
+--	 73
+-- ==================================================================================================
+-- OBSERVATION: 
+-- There are 73 records where pickup datetime timestamp is greater than drop off datetime timestamp. 
+-- Hence these record required to be dropped or filtered before further analysis.
+-- ==================================================================================================
+
+-- 3.5 Check for the number of passengers and their associated counts in the data sets.
+
+SELECT 
+    passenger_count, 
+    COUNT(*) AS num_of_passengers
+FROM sg_nyctlc_trip_data
+GROUP BY passenger_count
+ORDER BY passenger_count;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	passenger_count	num_of_passengers
+--          	0          	6824
+--          	1          	827499
+--          	2          	176872
+--          	3          	50693
+--          	4          	24951
+--          	5          	54568
+--          	6          	33146
+--          	7          	12
+--          	8          	3
+--          	9          	1
+-- ==================================================================================================
+-- OBSERVATION:  
+-- Trip cannot be paid for the 0 passengers and yellow taxi cannot accommodate 
+--  to a maximum of 6 passengers.(5 Adults & 1 under the age of 7) 
+--  Source: https://www1.nyc.gov/site/tlc/passengers/passenger-frequently-asked-questions.page
+-- There are 6824 records having passenger count as 0 registered. This erroneous records are due to
+-- some refund abonormalities.
+-- The 16 records of passenger counts greater than 6 which can be considered as erroneous entries.
+-- The highest number of passengers are Solo and followed by group of 2 passengers.
+-- ==================================================================================================
+
+-- 3.6 Check for the ratecodeid and their associated counts in the data sets.
+
+-- NOTE:: The valid ratecodeid as per the data dictionary are ;
+-- 1= Standard rate
+-- 2=JFK
+-- 3=Newark
+-- 4=Nassau or Westchester
+-- 5=Negotiated fare
+-- 6=Group ride
+
+SELECT 
+    ratecodeid as Rate_Code, 
+    COUNT(*) as Num_Ratecode
+FROM sg_nyctlc_trip_data
+GROUP BY ratecodeid 
+ORDER BY ratecodeid;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	rate_code	num_ratecode
+--  	1	        1142278
+--  	2	          25338
+--  	3	           2562
+--  	4	            586
+--  	5	           3793
+--  	6	              3
+--  	99      	      9
+-- ==================================================================================================
+-- OBSERVATION:
+-- The Standard Rate recorded for the highest number of records.
+-- The outlier ratecodeid 99 having 9 records which can be considered as wrong data and can be ignored 
+--  for further analysis.
+-- The valid rate codes are 1,2,3,4,5 and 6.
+-- ==================================================================================================
+
+-- 3.7 Check for the payment_type column.
+
+-- NOTE:: The valid payment type codes are ;
+--  1= Credit card
+--  2= Cash
+--  3= No charge
+--  4= Dispute
+--  5= Unknown
+--  6= Voided trip
+
+SELECT 
+    payment_type, 
+    COUNT(*) AS num_payment_types
+FROM sg_nyctlc_trip_data
+GROUP BY payment_type
+ORDER BY payment_type ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	payment_type	num_payment_types
+--      	1	            790256
+--      	2	            376374
+--      	3	              6274
+--      	4	              1665
+-- ==================================================================================================
+-- OBSERVATION:  
+-- There are 4 distinct payment_types present in data that are in agreement with the data-disctionary.
+-- The majority trips are paid using credit card i.e., Payment Type 1 and the least being voided trip.
+-- The Payment Type 2 being cash Payment.
+-- ==================================================================================================-
+
+-- 3.8 Check for the extra_charges column, According to the data dictionary 
+--     it only includes the $0.50 and $1 rush hour and overnight charges otherwise $0.
+
+SELECT 
+    extra, 
+    COUNT(*) AS num_extra_charges
+FROM sg_nyctlc_trip_data
+GROUP BY extra
+ORDER BY extra ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- extra	num_extra_charges
+-- -10.6	         1
+--  -4.5   		 	 5
+--  -1	            87
+--  -0.5	       193
+--   0		    631872
+--   0.3	        36
+--   0.5	    363455
+--   0.8	        15
+--   1	       	174386
+--   1.3	        13
+--   1.5	         2
+--   2	             1
+--   4.5	      4502
+--   4.8	         1
+-- ==================================================================================================
+-- OBSERVATION:  
+-- There are 14 distinct extra charges in the data set. However, only $0.5 and $1 are valid ones
+--  During rush hour or traffic charges are levied, otherwise the extra charges are considered as $0.
+-- The rest of the values are invalid and should be filtered/dropped for further analysis.
+-- The number of records other than $0,$0,5 and $1 is 4856.
+-- ==================================================================================================
+
+--3.9 Check for the mta_tax column. By default, as per the data dictionary it is $0.5
+
+SELECT 
+    mta_tax, 
+    COUNT(*) AS num_mta_tax
+FROM sg_nyctlc_trip_data
+GROUP BY mta_tax
+ORDER BY mta_tax ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	mta_tax	num_mta_tax
+--	   -0.5	        544
+--  	0	       5197
+--	    0.5	    1168824
+--	    3	          3
+--	    11.4	  	  1
+-- ==================================================================================================
+-- OBSERVATION:  
+-- There are 5 distinct mta tax in the data set. However, $0 and $0.50 are considered.
+-- There are 548 non conforming records and should considered invalid for the further analysis.
+-- ==================================================================================================
+
+--3.10 Check for the tip_amount column. 
+--     This field is automatically populated for Credit Card tips. However, Cash tips are not included.
+--     So, check any Cash tips records present.
+
+SELECT 
+    tip_amount, 
+    COUNT(*) AS num_tip_amount
+FROM sg_nyctlc_trip_data
+WHERE
+    payment_type = 2 AND  -- Cash Tips.
+    tip_amount  != 0
+GROUP BY tip_amount;
+
+-- ==================================================================================================
+-- OBSERVATION:  
+-- There are no records present for Cash type tips payments in the data set. 
+-- ==================================================================================================.
+
+--3.11 Check for the improvement_surcharge other than $0.30 has been recorded.
+
+SELECT 
+    improvement_surcharge, 
+    COUNT(*) AS num_improvement_surcharge
+FROM sg_nyctlc_trip_data
+GROUP BY improvement_surcharge
+ORDER BY improvement_surcharge ;
+
+-- ==================================================================================================
+-- ANSWER :
+-- 	improvement_surcharge	num_improvement_surcharge
+--  	-0.3	                558
+--       0                   	287
+--   	 0.3	            1173720
+--  	 1	                  	  4
+--==================================================================================================
+-- OBSERVATION:  
+-- There are 847 records other than $0.3 surcharge are recorded, for improvement surcharge 
+-- which can be ignored/filtered for the analysis. 
+-- ==================================================================================================
+
+-- 3.12 Check for the store_forward_flag parameter.
+
+SELECT 
+    store_and_fwd_flag, 
+    COUNT(*) AS num_store_and_fwd_flag
+FROM sg_nyctlc_trip_data
+GROUP BY store_and_fwd_flag
+ORDER BY store_and_fwd_flag;
+
+-- ==================================================================================================
+-- ANSWER :
+-- 	store_and_fwd_flag	num_store_and_fwd_flag
+--	    N	                 1170618
+--	    Y	                    3951
+-- ==================================================================================================
+-- OBSERVATION:  
+-- There are 2 types Y and N is record in the dataset.
+-- ==================================================================================================
+
+-- 3.13 Check for the statistics associated with Trip Details.
+
+SELECT  
+    COUNT(*)                            AS num_records,
+    COUNT(distinct vendorid)            AS unique_vendors,
+    MIN(to_date(tpep_pickup_datetime))  AS oldest_tpep_pickup_datetime,
+    MAX(to_date(tpep_pickup_datetime))  AS latest_tpep_pickup_datetime,
+    MIN(to_date(tpep_dropoff_datetime)) AS oldest_tpep_dropoff_datetime,
+    MAX(to_date(tpep_dropoff_datetime)) AS latest_tpep_dropoff_datetime,
+    MIN(passenger_count)                AS min_passengers,
+    MAX(passenger_count)                AS max_passengers,
+    AVG(passenger_count)                AS avg_passengers,
+    MIN(trip_distance)                  AS min_trip_distance,
+    MAX(trip_distance)                  AS max_trip_distance,
+    AVG(trip_distance)                  AS avg_trip_distance,
+    COUNT(distinct ratecodeid)          AS unique_ratecode,
+    COUNT(distinct store_and_fwd_flag)  AS unique_store_and_fwd_flag,
+    COUNT(distinct pulocationid)        AS unique_pickup_location,
+    COUNT(distinct dolocationid)        AS unique_dropoff_location,
+    COUNT(distinct payment_type)        AS unique_payment_type
+FROM sg_nyctlc_trip_data ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- num_records                   = 1174569
+-- unique_vendors                = 2
+-- oldest_tpep_pickup_datetime   = 2003-01-01
+-- latest_tpep_pickup_datetime   = 2018-01-01
+-- oldest_tpep_dropoff_datetime  = 2003-01-01
+-- latest_tpep_dropoff_datetime  = 2019-04-24
+-- min_passengers                = 0
+-- max_passengers                = 9
+-- avg_passengers                = 1.62
+-- min_trip_distance             = 0
+-- max_trip_distance             = 126.41
+-- avg_trip_distance             = 2.87
+-- unique_ratecode               = 7
+-- unique_store_and_fwd_flag     = 2
+-- unique_pickup_location        = 246
+-- unique_dropoff_location       = 260
+-- unique_payment_type           = 4
+-- ==================================================================================================
+-- OBSERVATION:  
+-- There are total of 1174569 records in the data set.
+-- There 2 unique TPEP Vendors
+-- The TPEP pickup datetime timestamp is between January 2003 and 2018.
+-- The TPEP dropoff datetime timestamp is between January 2003 and April 2019.
+-- The passenger counts is between 0 and 9.
+-- Similarly, the trip distance is between 0 and 126.41. The average trip distance 2.87 miles.
+-- There are 7 distinct rate codes. However, as per the data dictionary there are only 6 rate codes. 
+-- The pickup and drop off 4 distinct payment types.
+-- ==================================================================================================
+
+
+-- 3.14 Check for the statistics associated with Fare Details.
+
+SELECT  
+    MIN(fare_amount)              AS min_fare_amount, 
+    MAX(fare_amount)              AS max_fare_amount,
+    AVG(fare_amount)              AS avg_fare_amount,
+    MIN(extra)                    AS min_extra, 
+    MAX(extra)                    AS max_extra, 
+    AVG(extra)                    AS avg_extra,
+    MIN(mta_tax)                  AS min_mta_tax,
+    MAX(mta_tax)                  AS max_mta_tax,
+    AVG(mta_tax)                  AS avg_mta_tax,
+    COUNT(distinct mta_tax)       AS unique_mta_tax,
+    MIN(tip_amount)               AS min_tip_amount, 
+    MAX(tip_amount)               AS max_tip_amount, 
+    AVG(tip_amount)               AS avg_tip_amount,
+    MIN(tolls_amount)             AS min_tolls_amount, 
+    MAX(tolls_amount)             AS max_tolls_amount,
+    AVG(tolls_amount)             AS avg_tolls_amount,
+    MIN(improvement_surcharge)    AS min_improvement_surcharge,
+    MAX(improvement_surcharge)    AS max_improvement_surcharge,
+    AVG(improvement_surcharge)    AS avg_improvement_surcharge,
+    COUNT(distinct improvement_surcharge) AS unique_improvement_surcharge,
+    MIN(total_amount)             AS min_total_amount,
+    MAX(total_amount)             AS max_total_amount,
+    AVG(total_amount)             AS avg_total_amount
+FROM sg_nyctlc_trip_data ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- min_fare_amount =   -200
+-- max_fare_amount =    650
+-- avg_fare_amount =  12.99
+-- min_extra       = -10.60
+-- max_extra       =   4.80
+-- avg_extra       =   0.32
+-- min_mta_tax     =  -0.50
+-- max_mta_tax     =  11.40
+-- avg_mta_tax     =   0.50
+-- unique_mta_tax  =   5
+-- min_tip_amount  =  -1.16    
+-- max_tip_amount  =    450
+-- avg_tip_amount  =   1.85
+-- min_tolls_amount=  -5.76
+-- max_tolls_amount= 895.89
+-- avg_tolls_amount=   0.33
+-- min_improvement_surcharge = -0.30
+-- max_improvement_surcharge = 1
+-- avg_improvement_surcharge =  0.30
+-- unique_improvement_surcharge = 4
+-- min_total_amount =  -200.80
+-- max_total_amount =   928.19
+-- avg_total_amount=    16.29
+-- ==================================================================================================
+-- OBSERVATION:  
+-- The Fare Amount is between -$200 and $650. The average fare amount $13. Few lower bound outliers.
+-- The trips with negative fare charges can be treated as non-confirmaties.
+-- The extra charge is in the range -$10.60 and $4.80. Average extra amount is $0.32.
+-- The extra charge is a surcharge that can only be between $0.5 and $1 during peak hours, 
+--   otherwise it is $0. 
+-- Hence,All other values can be considered as invalid.
+-- The mta tax is in the range -$0.50 and $11.40. There are 5 unique mta tax.
+-- The tip amount is in the range of -$1.16 and $450. The Average Tip Amount is $1.85. 
+-- All negative tip amounts are abnormal and can be treated invalid data.
+-- The tolls amount is between -$5.76 and 895.89. Average tolls amount is $0.33.
+-- Again, all negative tolls amount are abnormal and can be treated as invalid.
+-- The improvement surchage range is between -$0.30 and $1. The average improvement surchage $0.30.  
+-- There are 4 distinct unique improvement surcharges.
+-- The total fare amount is in the range of -$200.80 and $928.19. The average total fare mount is $16.29.
+-- The negative total fare amount is valid as total_charges may be logged due to 
+--  refunds or disputed trips.
+-- The records which are greater than 0 will be considered for the analysis.
+-- ==================================================================================================
+
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- Q3: You might have encountered unusual or erroneous rows in the dataset. 
+-- Can you conclude which vendor is doing a bad job in providing the records using different columns of the dataset? 
+-- Summarise your conclusions based on every column where these errors are present. 
+-- For example,  There are unusual passenger count, i.e. 0 which is unusual.
+-- -----------------------------------------------------------------------------------------------------------------
+
+SELECT 
+  vendorid, 
+  COUNT(*) AS num_error_records
+FROM 
+  sg_nyctlc_trip_data
+WHERE(
+  YEAR(tpep_pickup_datetime)    != 2017                 OR
+  MONTH(tpep_pickup_datetime)   NOT IN (11,12)          OR 
+  YEAR(tpep_dropoff_datetime)   != 2017                 OR
+  MONTH(tpep_dropoff_datetime)  NOT IN (11,12)          OR 
+  UNIX_TIMESTAMP(tpep_pickup_datetime) >
+          UNIX_TIMESTAMP(tpep_dropoff_datetime)         OR
+  passenger_count               NOT IN (1,2,3,4,5,6)    OR
+  trip_distance                 <= 0.0                  OR
+  ratecodeid                    NOT IN (1,2,3,4,5,6)    OR
+  payment_type                  NOT IN (1,2,3,4,5,6)    OR
+  fare_amount                   <= 0.0                  OR
+  extra                         NOT IN (0,0.5,1.0)      OR
+  mta_tax                       NOT IN (0,0.5)          OR 
+  tip_amount                    < 0.0                   OR
+  tolls_amount                  < 0.0                   OR
+  improvement_surcharge          NOT IN (0,0.3)         OR
+  total_amount                  <=0.0)
+GROUP BY vendorid
+ORDER BY vendorid ;
+
+  
+-- ==================================================================================================-
+-- ANSWER:
+--	vendorid	num_error_records
+--  	1	        12912
+--  	2	        6416 
+-- ==================================================================================================
+-- OBSERVATION:
+-- For VendorID 1: Creative Moblie Technologies,LLC
+-- Number of Invalid or erroneous Records provided: 12,912 records
+-- Total Records provided [From Query 1]: 527,386 records
+-- Percentage of Invalid or errorneous Records : 2.44%
+
+--For VendorID 2: VeriFone Inc.
+--Number of Invalid or erroneous Records Records Provided: 6,416 records
+--Total Records Provided [From Query 1]: 647,183 records  
+--Percentage Invalid or erroneous Records: 0.991%
+-- ==================================================================================================
+
+-- ==================================================================================================-
+-- INFERENCE:
+-- From the above Observations, it is clear that of the two vendors,
+-- VendorID 1: Creative Moblie Technologies,LLC is doing a bad job of providing records.
+-- ==================================================================================================
+-- ==================================================================================================-
+-- CONCLUSIONS:
+-- Based on the above inference only records conforming and valid trip and fare records considered for
+--   further Analysis-1 and  Analysis-2 Sections.
+-- A new ORC table will be created using the above filtered conditions.
+-- The table will be in ORC format partitioned on month and day of for year 2017
+-- ==================================================================================================
+
+-- ** ************************************************************************* 
+-- 3.0 EDA Analysis - Basic Data Quality Checks - ENDS HERE..
+-- ** ************************************************************************* 
+
+
+
+
+-- ** ************************************************************************* 
+-- 4.0 EDA Analysis - Analysis - I
+-- ** ************************************************************************* 
+
+SET hive.exec.dynamic.partition = true;
+SET hive.exec.dynamic.partition.mode = nonstrict;
+SET hive.exec.max.dynamic.partitions = 1000;
+SET hive.exec.max.dynamic.partitions.pernode = 1000;
+SET hive.execution.engine=mr;
+
+------------------------------------------------------------------------------------------------------
+-- 4.1 Create the orc_partitioned taxifare table 
+-- Name of ORC Partitioned Table : sg_nyctlc_trip_data_orc_partitioned
+-- Location in HDFS Directory    : /user/gopalasr_gmail/sgnyctlctripdata/orc_parted/
+------------------------------------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS sg_nyctlc_trip_data_orc_partitioned ;
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sg_nyctlc_trip_data_orc_partitioned(
+    vendorid int, 
+    tpep_pickup_datetime string, 
+    tpep_dropoff_datetime string,
+    passenger_count int, 
+    trip_distance double,
+    ratecodeid int, 
+    store_and_fwd_flag string, 
+    pulocationid int, 
+    dolocationid int,
+    payment_type int, 
+    fare_amount double, 
+    extra double, 
+    mta_tax double,
+    tip_amount double, 
+    tolls_amount double,
+    improvement_surcharge double, 
+    total_amount double) 
+PARTITIONED BY (mnth int, mday int)
+STORED AS ORC
+LOCATION '/user/hive/warehouse/001_sg_orc_parted/'
+TBLPROPERTIES ("orc.compress" = "SNAPPY");
+
+-- ==================================================================================================
+-- OBSERVATION:
+-- New External Partitioned ORC Table sg_nyctlc_trip_data_orc_partitioned is created using partition keys
+-- mnth and day
+-- ==================================================================================================
+--4.2 Load  External Partitioned ORC Table - sg_nyctlc_trip_data_orc_partitioned with data
+
+INSERT OVERWRITE TABLE sg_nyctlc_trip_data_orc_partitioned 
+PARTITION(mnth, mday)
+    SELECT
+        vendorid, 
+        tpep_pickup_datetime, 
+        tpep_dropoff_datetime, 
+        passenger_count, 
+        trip_distance, 
+        ratecodeid,
+        store_and_fwd_flag,
+        pulocationid,
+        dolocationid, 
+        payment_type, 
+        fare_amount, 
+        extra, 
+        mta_tax,
+        tip_amount, 
+        tolls_amount,
+        improvement_surcharge, 
+        total_amount, month(tpep_pickup_datetime) AS mnth, day(tpep_pickup_datetime) AS mday
+    FROM sg_nyctlc_trip_data
+    WHERE 
+        year(tpep_pickup_datetime) = 2017       AND 
+        month(tpep_pickup_datetime) IN (11,12)  AND
+        year(tpep_dropoff_datetime) = 2017      AND
+        month(tpep_dropoff_datetime) IN (11,12) AND 
+        unix_timestamp(tpep_pickup_datetime) < 
+          unix_timestamp(tpep_dropoff_datetime) AND
+        passenger_count IN (1,2,3,4,5,6)        AND
+        trip_distance > 0.0                     AND 
+        ratecodeid  IN (1,2,3,4,5,6)            AND
+        payment_type IN (1,2,3,4,5,6)           AND
+        fare_amount > 0.0                       AND
+        extra IN (0,0.5,1.0)                    AND
+        mta_tax IN (0,0.5)                      AND
+        tip_amount   >= 0.0                     AND
+        tolls_amount >= 0.0                     AND 
+        improvement_surcharge IN (0,0.3)        AND 
+        total_amount > 0.0;
+        
+        
+-- 4.3 Check the total rows in the partitioned/ORC Table.
+
+SELECT 
+    A.total_rows,
+    (1174569 - A.total_rows) AS filtered_rows,
+    ROUND((100*((1174569 - A.total_rows)/1174569)),3) AS prcentage_invalid_rows
+FROM
+    (SELECT 
+        COUNT(*) AS total_rows 
+    FROM sg_nyctlc_trip_data_orc_partitioned
+    ) AS A ;
+    
+    
+-- ==================================================================================================
+-- ANSWER:
+-- 	a.total_rows	filtered_rows	prcentage_invalid_rows
+--  	1153495	            21074	        1.794
+-- ===================================================================================================
+-- OBSERVATION: 
+-- There are 1153495 records [1.1 Million] Records loaded in to the partitiioned ORC Table.
+-- The number of filtered or invalid rows are 21,074.  
+-- Percentage of rows ignored or filtered due data inconsistency 1.79%.
+-- All further analysis will be done using the partitioned table.
+-- ===================================================================================================
+
+-- --------------------------------------------------------------------------------------------------
+-- Q1: Compare the overall average fare per trip for November and December.
+-- -------------------------------------------------------------------------------------------------
+
+SET hive.auto.convert.join=false;
+SET hive.auto.convert.join.noconditionaltask=false ;
+
+-- 4.4 Check the Average Fare Amount for the partitioned year and month.
+
+SELECT
+    mnth AS month_year,
+    ROUND(AVG(fare_amount),2) AS average_monthly_fare_amount
+FROM 
+    sg_nyctlc_trip_data_orc_partitioned
+GROUP BY mnth 
+ORDER BY mnth ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	month_year	average_monthly_fare_amount
+--	    11	        12.91
+--	    12	        12.70
+-- ==================================================================================================
+-- OBSERVATION:
+-- November Overall Average Fare_Amount: $12.91
+-- December Overall Average Fare Amount: $12.70
+-- ==================================================================================================
+
+
+-- ------------------------------------------------------------------------------------------------
+-- Q2: Explore the ‘number of passengers per trip’ - how many trips are made by each level of 
+--     ‘Passenger_count’? 
+--     Do most people travel solo or with other people?
+-- -----------------------------------------------------------------------------------------------
+
+-- 4.5 Check the number of trips made by passenger counts .
+
+SELECT 
+    passenger_count AS Number_of_Passengers,
+    COUNT(*) AS Number_of_trips
+FROM sg_nyctlc_trip_data_orc_partitioned
+GROUP BY passenger_count
+ORDER BY passenger_count ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	number_of_passengers	number_of_trips
+--      	1	            816970
+--      	2	            174766
+--      	3	            50177
+--      	4	            24679
+--      	5	            54026
+--      	6           	32877
+-- ==================================================================================================
+-- OBSERVATION:
+-- Number of trips made by Passengers who travel Solo are 816,970. [0.8 million]
+-- Number of trips made by passengers who travel with other people are 336,525 [0.3 million]
+-- ==================================================================================================
+
+-- 4.6 Check the percentage of passenger who prefers to travel solo or
+--  who prefers to travel in groups.
+
+SELECT 
+    SUM(CASE WHEN passenger_count  = 1 THEN 1 ELSE 0 END) AS solo_passenger_trips,
+    SUM(CASE WHEN passenger_count != 1 THEN 1 ELSE 0 END) AS group_passenger_trips,
+    ROUND(100*SUM(CASE WHEN passenger_count = 1 THEN 1 ELSE 0 END)/COUNT(*),3) 
+                                                          AS percent_solo_of_total_trips,
+    ROUND(100*SUM(CASE WHEN passenger_count != 1 THEN 1 ELSE 0 END)/COUNT(*),3) 
+                                                          AS percent_group_of_total_trips
+FROM 
+    sg_nyctlc_trip_data_orc_partitioned ;
+    
+-- ==================================================================================================
+-- ANSWER:
+-- 	solo_passenger_trips	group_passenger_trips	percent_solo_of_total_trips	percent_group_of_total_trips
+--	        816970	                   336525	              70.826	                  29.174
+-- ==================================================================================================
+-- OBSERVATION:
+-- As seen already, people prefers travel solo than with groups.
+-- The percentage of Solo trips made by passengers is 70.83%
+-- The percentage of group trips made by passengers is 29.17%
+-- ==================================================================================================   
+
+
+-- ------------------------------------------------------------------------------------------------
+-- Q3: Which is the most preferred mode of payment?
+-- ------------------------------------------------------------------------------------------------
+
+-- 4.7 Check for the preferred payment mode i.e., number of trips by payment mode.
+
+
+SELECT 
+    payment_type, 
+    COUNT(*) AS Payment_type_counts
+FROM sg_nyctlc_trip_data_orc_partitioned 
+GROUP BY payment_type
+ORDER BY Payment_type_counts DESC ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	payment_type	payment_type_counts
+--	        1           	779093
+--	        2           	368611
+--	        3           	4491
+--	        4           	1300
+-- ==================================================================================================
+-- OBSERVATION:
+-- From the result, it is clear most people prefer payment through Credit Card [payment type = 1].
+-- Followed by, Cash Payments [payment type = 2]
+-- ==================================================================================================   
+
+-- 4.8 Check the percentage of payment types (Credit Card & Cash Payments) 
+
+SELECT SUM(CASE WHEN payment_type = 1 THEN 1 ELSE 0 END) AS credit_card_paid_trips,
+       SUM(CASE WHEN payment_type = 2 THEN 1 ELSE 0 END) AS cash_paid_trips,
+       COUNT(*) AS total_trips,
+       ROUND(100*SUM(CASE WHEN payment_type = 1 THEN 1 ELSE 0 END)/COUNT(*),2) AS percent_credit_card_paid_trips,
+       ROUND(100*SUM(CASE WHEN payment_type = 2 THEN 1 ELSE 0 END)/COUNT(*),2) AS percent_cash_paid_trips
+FROM sg_nyctlc_trip_data_orc_partitioned ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	credit_card_paid_trips	cash_paid_trips	total_trips	percent_credit_card_paid_trips	percent_cash_paid_trips
+--	  779093	            368611	    1153495	                 67.54	     		 31.96
+-- ==================================================================================================
+-- OBSERVATION:
+-- Number of Credit Card Paid Trips by the passengers :  779093
+-- Number of Cash paid Trips by the passengers        :  368611
+-- Total Number of trips by the passengers            : 1153495
+-- Percentage Credit Card Paid Trips                  : 67.54%
+-- Percentage Cash Paid Trips                         : 31.96%
+-- ==================================================================================================
+
+
+-- ------------------------------------------------------------------------------------------------
+-- Q4: What is the average tip paid per trip? Compare the average tip with the 25th, 50th and 75th.
+-- ------------------------------------------------------------------------------------------------
+
+-- 4.9 Check for the Average tip paid per trip and corresponding percentiles.
+
+-- NOTE:
+--  The Tip Amount is recorded only for the Credit Card Payments. 
+--  The Cash type Payments are not included and hence they should be removed from the analysis 
+--  The 25,50 and 75th Percentile are calculated using Hive UDF function PERCENTILE_APPROX.
+
+-- NOTE: IMPORTANT::
+--  Here, since tip_amount is stored as double data type we have to use percentile_approx() instead of percentile().
+--  From the Hive documentation: percentile_approx(DOUBLE col, p [, B]).
+--  Returns an approximate pth percentile of a numeric column (including floating point types) in the group. 
+--  The B parameter controls approximation accuracy at the cost of memory. 
+--  Higher values yield better approximations, and the default is 10,000. 
+--  When the number of distinct values in col is smaller than B, this gives an exact percentile value.
+
+SELECT 
+    ROUND(AVG(tip_amount),2) AS average_tip_amount_per_trip,
+    ROUND(PERCENTILE_APPROX(tip_amount,0.25),3) AS 25th_percentile_tip_amount,
+    ROUND(PERCENTILE_APPROX(tip_amount,0.50),3) AS 50th_percentile_tip_amount,
+    ROUND(PERCENTILE_APPROX(tip_amount,0.75),3) AS 75th_percentile_tip_amount,
+    COUNT(distinct tip_amount) AS distict_tip_amount
+FROM 
+    sg_nyctlc_trip_data_orc_partitioned
+WHERE 
+    payment_type !=2;
+    
+-- ==================================================================================================
+-- ANSWER:
+-- 	average_tip_amount_per_trip	25th_percentile_tip_amount	50th_percentile_tip_amount	75th_percentile_tip_amount  
+--                  	2.68	                    1.347	                   1.999	           3.05
+-- ==================================================================================================
+-- OBSERVATION:
+-- The IQR is [3.050 - 1.347 = 1.703]. 
+-- There $0.681 difference of the Average_Tip - Median_Tip [50th percentile]. 
+-- So, this difference constitutes 39.98% of IQR
+-- Therefore, there is significant skew in the data it is to the right of Median Tip.
+-- ==================================================================================================
+
+
+
+-- ------------------------------------------------------------------------------------------------------------
+-- Q5: Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+-- ------------------------------------------------------------------------------------------------------------
+
+-- 4.10 Check for the extra column counts and its fraction on total number trips.
+
+SELECT  
+    extra, 
+    COUNT(*) AS extra_charge_counts
+FROM sg_nyctlc_trip_data_orc_partitioned
+GROUP BY extra
+ORDER BY extra_charge_counts DESC ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	extra	extra_charge_counts
+--  	0           621234
+--  	0.5         359747
+--  	1           172514
+-- ==================================================================================================
+-- OBSERVATION:
+-- Number of trips where extra charge not levied [ $0 Charges ]          = 621,234
+-- Number of trips where extra charge levied [Charges $0.5 or $1.0]     =  532,261
+-- ==================================================================================================
+
+-- 4.11 Calculate the fraction of extra charge column on overall trips.
+
+
+SELECT 
+    SUM(CASE WHEN extra !=0 THEN 1 ELSE 0 END) AS trips_with_extra_charge,
+    COUNT(*) AS total_number_of_trips,
+    ROUND(SUM(CASE WHEN extra != 0 THEN 1 ELSE 0 END)/COUNT(*),3) AS fraction_of_trips_with_extra_charge
+FROM 
+    sg_nyctlc_trip_data_orc_partitioned ;
+    
+-- ==================================================================================================
+-- ANSWER:
+-- 	trips_with_extra_charge	total_number_of_trips	fraction_of_trips_with_extra_charge
+--	                 532261	        1153495	                                0.461
+-- ==================================================================================================
+-- OBSERVATION:
+-- Total Number of Trips = 1,153,495.
+-- The number of trips which are levied with extra charge = 532,261.
+-- The Fraction of trips which are levied with extra charges to the total trips = 0.461% [46.1%]
+-- ==================================================================================================
+
+-- ** **********************************************************************************************
+-- 4.0 EDA Analysis - Analysis - I - ENDS HERE..
+-- ** **********************************************************************************************
+
+
+
+
+-- ** **********************************************************************************************
+-- 5.0 EDA Analysis - Analysis - II
+-- ** **********************************************************************************************
+
+-- ------------------------------------------------------------------------------------------------------------
+-- Q1: What is the correlation between the number of passengers on any given trip, and the tip paid per trip? 
+--     Do multiple travellers tip more compared to solo travellers? Hint: Use CORR(Col_1, Col_2)
+-- ------------------------------------------------------------------------------------------------------------
+
+-- NOTE:: IMPORTANT::
+-- As per data dictionary, the Tip Amount is recorded only for the Credit Card Payments.[Payment_Type = 1] 
+-- The Cash type Payments [Payment_Type = 2] are not included and hence they should be removed from the analysis
+
+-- 5.1 Find out correlation between passenger counts and tip amount.
+
+
+SELECT 
+    CORR(passenger_count, tip_amount) AS corr_passenger_and_tip_amount,
+    ROUND(AVG(CASE WHEN passenger_count  = 1 THEN tip_amount ELSE NULL END),2)  AS avg_solo_passenger_trips,
+    ROUND(AVG(CASE WHEN passenger_count != 1 THEN tip_amount ELSE NULL END),2)  AS avg_group_passenger_trips
+FROM
+    sg_nyctlc_trip_data_orc_partitioned
+WHERE payment_type != 2 ;
+
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	corr_passenger_and_tip_amount	avg_solo_passenger_trips	avg_group_passenger_trips
+--	0.009115594910053773	                    2.66	                     2.74
+-- ==================================================================================================  
+-- OBSERVATION:
+-- The Correlation between number of passengers and the tip amount is positive and is = +0.009
+-- This suggest it is very weak positive correlation between passgener counts and tip amount.
+-- The Average tip amount for solo passenger trips taken = 2.66
+-- The Average tip amount for group passenger trips taken = 2.74
+-- Again, there isn't much difference in the tip amounts based on passenger counts indicates
+--  the weak correlation.
+-- ==================================================================================================
+
+
+-- ------------------------------------------------------------------------------------------------------------
+-- Q2: Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20.
+--     Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+-- ------------------------------------------------------------------------------------------------------------
+
+-- 5.2 Create Segment Buckets for tip amount and calculate number of trips recorded on each bucket.
+
+SELECT 
+    tip_bucket, 
+    COUNT(*)                            AS bucket_count,
+    MAX(num_records)                    AS total_records,
+    ROUND(COUNT(*)/MAX(num_records),5)  AS fraction_of_tip_bucket
+FROM
+    (SELECT
+        nyc_part_table.*,
+        COUNT(*) OVER() num_records,
+        CASE WHEN tip_amount >= 0.0  AND tip_amount < 5.0   THEN 'bucket_0_5'
+             WHEN tip_amount >= 5.0  AND tip_amount < 10.0  THEN 'bucket_5_10'
+             WHEN tip_amount >= 10.0 AND tip_amount < 15.0  THEN 'bucket_10_15'
+             WHEN tip_amount >= 15.0 AND tip_amount < 20.0  THEN 'bucket_15_20'
+             ELSE 'bucket_above_20'
+        END AS tip_bucket
+     FROM sg_nyctlc_trip_data_orc_partitioned AS nyc_part_table
+    ) AS A
+GROUP BY tip_bucket
+ORDER BY fraction_of_tip_bucket DESC ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	tip_bucket	bucket_count	total_records	fraction_of_tip_bucket
+--	bucket_0_5	    1065877	        1153495	           0.92404
+--	bucket_5_10	      65032	        1153495	           0.05638
+--	bucket_10_15	  19410	        1153495	           0.01683
+--	bucket_15_20	   2160	        1153495	           0.00187
+--	bucket_above_20	   1016	        1153495	           0.00088
+-- ==================================================================================================
+-- OBSERVATION:
+-- The tip amount is segmented in to five buckets as [0-5],[5-10],[10-15],[15-20] and [>=20].
+-- The tip buckets constitutes the following fractions of overall trips :
+--   1. The bucket_0_5 have 92.404% of overall records.
+--   2. The bucket_5_10 have  5.63% of overall records.
+--   3. The bucket_10_15 have 1.68% of overall records.
+--   4. The bucket_15_20 have 0.187% of overall records.
+--   5. The bucket_above_20 have 0.088% of overall records.
+-- Also, Please note, As per data dictionary, the Tip Amount is recorded only for 
+--   the Credit Card Payments.[Payment_Type = 1]. 
+-- So, all Cash type payments will have value $0 automatically.
+-- We also know from the Question-3 of Analysis-I section, the fraction of Cash paid trips is around 32% 
+--  i.e., [368611 records out of total 1153495 records].
+-- So, we may need to filter on only payment_type =1 records (credit card payment) if we need to 
+--  get clear picture of actual fractions of tips in the overall paid records.
+-- ==================================================================================================
+
+-- 5.3 Create Segment Buckets for tip amount and calculate number of trips recorded
+--      and fractions on each bucket excluding Cash Payment Type [Payment Type =2].
+
+SELECT 
+    tip_bucket, 
+    COUNT(*)                            AS bucket_count,
+    MAX(num_records)                    AS total_records,
+    ROUND(COUNT(*)/MAX(num_records),5)  AS fraction_of_tip_bucket
+FROM
+    (SELECT
+        nyc_part_table.*,
+        COUNT(*) OVER() num_records,
+        CASE WHEN tip_amount >= 0.0  AND tip_amount < 5.0   THEN 'bucket_0_5'
+             WHEN tip_amount >= 5.0  AND tip_amount < 10.0  THEN 'bucket_5_10'
+             WHEN tip_amount >= 10.0 AND tip_amount < 15.0  THEN 'bucket_10_15'
+             WHEN tip_amount >= 15.0 AND tip_amount < 20.0  THEN 'bucket_15_20'
+             ELSE 'bucket_above_20'
+        END AS tip_bucket
+     FROM sg_nyctlc_trip_data_orc_partitioned AS nyc_part_table
+    ) AS A
+WHERE A.payment_type != 2  -- Excluding Cash Payments.
+GROUP BY tip_bucket
+ORDER BY fraction_of_tip_bucket DESC ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	tip_bucket	bucket_count	total_records	fraction_of_tip_bucket
+--  bucket_0_5		697266	        1153495             0.60448
+--	bucket_5_10		 65032	        1153495	            0.05638
+--	bucket_10_15	 19410	        1153495	            0.01683
+--	bucket_15_20	  2160	        1153495	            0.00187
+--	bucket_above_20	  1016	        1153495             0.00088
+-- ==================================================================================================
+-- OBSERVATION:
+-- The tip buckets constitutes the following fractions of overall trips excluding cash payments :
+--   1. The bucket_0_5 have   60.60%    of overall records.
+--   2. The bucket_5_10 have  5.63%     of overall records.
+--   3. The bucket_10_15 have 1.68%     of overall records.
+--   4. The bucket_15_20 have 0.187%    of overall records.
+--   5. The bucket_above_20 have 0.088% of overall records.
+-- ==================================================================================================
+
+
+-- ------------------------------------------------------------------------------------------------------------
+-- Q3: Which month has a greater average ‘speed’ - November or December? 
+-- Note that the variable ‘speed’ will have to be derived from other metrics.
+-- ------------------------------------------------------------------------------------------------------------
+
+-- 5.4 Derive new field speed and calculate the average speed for November & December 2017.
+--     Find out the difference of speed between November & December to find which month
+--     it is greater.
+
+SELECT ROUND(AVG(CASE 
+                    WHEN mnth = 11 
+                    THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                          unix_timestamp(tpep_pickup_datetime)) / 3600))
+                    ELSE NULL END),3) AS November_Average_Speed,
+       ROUND(AVG(CASE 
+                 WHEN mnth = 12 THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) - 
+                                                      unix_timestamp(tpep_pickup_datetime)) / 3600))
+                                ELSE NULL END),3) AS December_Average_Speed,
+        ROUND(ROUND(AVG(CASE WHEN mnth = 12 THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                                                  unix_timestamp(tpep_pickup_datetime)) /3600))
+                                ELSE NULL END),3) - 
+              ROUND(AVG(CASE WHEN mnth = 11 THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                                                  unix_timestamp(tpep_pickup_datetime)) /3600))
+                                ELSE NULL END),3),3) AS diff_November_December_Avg_Speed
+FROM    sg_nyctlc_trip_data_orc_partitioned ;
+
+-- ==================================================================================================
+-- ANSWER:
+-- 	november_average_speed	december_average_speed	diff_november_december_avg_speed
+--	    10.966	                    11.065	                    0.099
+-- ==================================================================================================
+-- OBSERVATION:
+-- The Average Speed is derived field from trip_distance and timestamp values from pickup and dropoff 
+-- The Average Speed in Novemnber = 10.966 mph
+-- The Average Speed in December  = 11.065 mph
+-- The Average Speed in December is greater than in November by 0.099 mph.
+-- ==================================================================================================
+
+
+-- ------------------------------------------------------------------------------------------------------------
+-- Q4: Analyse the average speed of the most happening days of the year, 
+-- i.e. 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average. 
+-- ------------------------------------------------------------------------------------------------------------
+
+-- 5.5 Find out the average speed on 25th (Christmas Eve) and 31st December (New Year's Eve)
+--     Compare the speed with Overal Average Speed with the months November & December.
+.
+
+SELECT  ROUND(AVG(CASE
+                    WHEN mnth IN (11,12) 
+                    THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                          unix_timestamp(tpep_pickup_datetime)) / 3600))
+                    ELSE NULL END),3) AS Overall_Avg_Speed,
+        ROUND(AVG(CASE 
+                    WHEN mnth = 12 AND mday = 25 
+                    THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                          unix_timestamp(tpep_pickup_datetime)) / 3600))
+                    ELSE NULL END),3) AS Christmas_Avg_Speed,
+        ROUND(AVG(CASE 
+                    WHEN mnth = 12 AND mday = 31 
+                    THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                          unix_timestamp(tpep_pickup_datetime)) / 3600))
+                    ELSE NULL END),3) AS Newyear_Avg_Speed,
+        ROUND(ROUND(AVG(CASE WHEN mnth = 12 AND mday = 25
+                             THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                                                  unix_timestamp(tpep_pickup_datetime)) /3600))
+                             ELSE NULL END),3) - 
+              ROUND(AVG(CASE WHEN mnth IN (11,12)
+                             THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                                                  unix_timestamp(tpep_pickup_datetime)) /3600))
+                             ELSE NULL END),3),3) AS diff_christmas_all_Avg_Speed,
+        ROUND(ROUND(AVG(CASE WHEN mnth = 12 AND mday = 31
+                             THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                                                  unix_timestamp(tpep_pickup_datetime)) /3600))
+                             ELSE NULL END),3) - 
+              ROUND(AVG(CASE WHEN mnth IN (11,12)
+                             THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime) -
+                                                                  unix_timestamp(tpep_pickup_datetime)) /3600))
+                             ELSE NULL END),3),3) AS diff_newyear_all_Avg_Speed                    
+        
+FROM    sg_nyctlc_trip_data_orc_partitioned ;
+
+
+-- ==================================================================================================
+-- ANSWER: 
+-- overall_avg_speed	christmas_avg_speed newyear_avg_speed	diff_christmas_all_avg_speed	diff_newyear_all_avg_speed
+--	    11.016	                15.265	        13.269	                    4.249	    			2.253
+-- ==================================================================================================
+-- OBSERVATION:
+-- 1. Overall Average Speed for the Months November and December = 11.016 mph
+-- 2. Statistics for Christmas Eve (25th December)
+--    a. Average Speed on Christmas Eve = 15.265 mph
+--    b. Average Speed greater than overall Average = 4.25 mph
+--    c. Percentage speed greater than Overall Average = 38.58%
+-- 3. Statistics for New Years Eve (31st December)
+--    a. Average Speed on New Years Eve - 13.29 mph 
+--    b. Average speed greater than overall Average = 2.253 mph
+--    c. Percentage speed greater than overall Average = 20.45%
+-- The average speed on both Cristmas and New Year is higher than the overall average speed.
+-- The average speed highest for Christmas Eve.
+-- ==================================================================================================
+
+
+-- ** **********************************************************************************************
+-- 5.0 EDA Analysis - Analysis - II - ENDS HERE..
+-- ** **********************************************************************************************
+
